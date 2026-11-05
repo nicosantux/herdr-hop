@@ -1,0 +1,37 @@
+id = "herdr-hop"
+name = "Hop"
+version = "1.0.0"
+min_herdr_version = "0.9.0"
+description = "Hop between herdr sessions and open folders as workspaces from fzf popups"
+platforms = ["linux", "macos"]
+
+# Bind these from config.toml with `type = "plugin_action"`, for example
+# `command = "herdr-hop.session"`. See README.md.
+[[actions]]
+id = "session"
+title = "Switch session"
+contexts = ["global"]
+command = ["bash", "bin/open", "session"]
+
+[[actions]]
+id = "workspace"
+title = "Open folder as workspace"
+contexts = ["global"]
+command = ["bash", "bin/open", "workspace"]
+
+# Plugin popups are titled with the pane title, keybinding popups are not.
+[[panes]]
+id = "session"
+title = "switch session"
+placement = "popup"
+width = "75%"
+height = "75%"
+command = ["bash", "bin/hop", "--switch"]
+
+[[panes]]
+id = "workspace"
+title = "open workspace"
+placement = "popup"
+width = "90%"
+height = "85%"
+command = ["bash", "bin/workspace"]

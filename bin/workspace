@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Pick a folder with fzf and open it as a new workspace of the current herdr
+# session. Folders come from zoxide (most used first) and then from the
+# extra-dirs file, minus the ones that already have a workspace (matched by its
+# first pane cwd). extra-dirs is created with common project roots on first use,
+# so the picker works without zoxide or any setup.
+
+HERDR=${HERDR_BIN_PATH:-herdr}
+self=$(realpath "$0")
+config_dir=${HERDR_PLUGIN_CONFIG_DIR:-$("$HERDR" plugin config-dir herdr-hop 2>/dev/null)}
+extra_dirs_file="$config_dir/extra-dirs"
+
+fail() {
+  printf 'hop workspace: %s\n\npress any key to close' "$1"
+  read -rsn1
+  exit 1
+}
+
+for dep in "$HERDR" fzf jq; do
+  command -v "$dep" >/dev/null || fail "$dep not found"
+done
+
+create_extra_dirs_file() {
+  mkdir -p "$config_dir"
+  cat >"$extra_dirs_file" <<'EOF'
+# Folders offered by the herdr-hop workspace opener, after zoxide's.
+# One folder or glob per line: `~/dev/*` lists the folders inside ~/dev.
+# Blank lines and comments are ignored, paths that do not exist are skipped.
+~/dev/*
+~/code/*
+~/projects/*
+~/src/*
+~/work/*
+~/repos/*
+~/Developer/*
+EOF
+}
+
+# Prints the folders in extra-dirs, expanding `~` and globs in file order.
+extra_dirs() {
+  [[ -f $extra_dirs_file ]] || return 0
+  # An empty IFS keeps paths with spaces whole while unquoted globs still expand.
+  local IFS= line match
+  shopt -s nullglob
+  while read -r line || [[ -n $line ]]; do
+    [[ -z $line || $line == \#* ]] && continue
+    for match in ${line/#\~/$HOME}; do
+      [[ -d $match ]] && printf '%s\n' "$match"
+    done
+  done <"$extra_dirs_file"
+}
+
+# Working directory of each workspace's first pane.
+open_cwds() {
+  "$HERDR" pane list | jq -r '.result.panes | group_by(.workspace_id)[] | .[0].cwd // empty'
+}
+
+# TSV rows for fzf: path, display path.
+list_folders() {
+  {
+    command -v zoxide >/dev/null && zoxide query --list
+    extra_dirs
+  } \
+    | sed 's:/$::' \
+    | awk 'FILENAME == ARGV[1] { skip[$0]; next } !($0 in skip) && !seen[$0]++' <(open_cwds) - \
+    | while IFS= read -r dir; do
+        [[ -d $dir ]] || continue
+        display=$dir
+        [[ $dir == "$HOME" || $dir == "$HOME"/* ]] && display="~${dir#"$HOME"}"
+        printf '%s\t%s\n' "$dir" "$display"
+      done
+}
+
+# A one-line git summary and the last commit, above the folder contents.
+preview() {
+  local dir=$1
+  if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+    git -C "$dir" status --porcelain=v2 --branch | awk '
+      /^# branch.head / { head = $3 }
+      /^# branch.ab / { ahead = substr($3, 2) + 0; behind = substr($4, 2) + 0 }
+      !/^#/ { changed++ }
+      END {
+        line = "\033[32m" head "\033[0m"
+        if (ahead) line = line "  ↑" ahead
+        if (behind) line = line "  ↓" behind
+        print line "  · " (changed ? changed " changed" : "clean")
+      }'
+    git -C "$dir" log -1 --format='%s %C(dim)· %cr%C(reset)' --color=always 2>/dev/null
+    echo
+  fi
+  ls -Ap "$dir"
+}
+
+case ${1:-} in
+  --preview) preview "$2"; exit 0 ;;
+esac
+
+[[ -f $extra_dirs_file ]] || create_extra_dirs_file
+
+folders=$(list_folders)
+[[ -n $folders ]] || fail "no folders to open: install zoxide or add folders to $extra_dirs_file"
+
+dir=$(fzf \
+  --delimiter='\t' --with-nth=2 \
+  --tiebreak=index \
+  --prompt='workspace ❯ ' \
+  --header='enter: open as workspace · esc: quit' \
+  --preview="bash '$self' --preview {1}" \
+  --preview-window='right,50%,border-left' <<<"$folders" | cut -f1)
+[[ -n $dir ]] || exit 0
+
+"$HERDR" workspace create --cwd "$dir" --label "$(basename "$dir")" --focus >/dev/null

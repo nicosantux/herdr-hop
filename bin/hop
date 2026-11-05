@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# hop - list/attach/create/stop/delete herdr sessions with fzf.
+#
+#   hop            pick a session from a raw shell and attach to it
+#   hop <name>     attach to (or create) <name> directly
+#   hop --switch   session popup inside herdr (the herdr-hop.session action)
+#
+# herdr forbids nested launches, so `hop` keeps running around the herdr
+# client: `--switch` records the next session for the hop process that owns the
+# current client and hangs that client up, then hop attaches to the recorded
+# session. Switching only works for clients started with `hop`.
+
+HERDR=${HERDR_BIN_PATH:-herdr}
+self=$(realpath "$0")
+header='enter: attach/create · alt-enter: create · ctrl-k: stop · ctrl-x: delete · esc: quit'
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-hop"
+
+green=$(tput setaf 2) gray=$(tput setaf 8) blue=$(tput setaf 4) red=$(tput setaf 1) yellow=$(tput setaf 3) reset=$(tput sgr0)
+
+fail() {
+  printf '%s\n' "${red}hop: $1${reset}" >&2
+  if [[ -n ${HERDR_PLUGIN_ENTRYPOINT_ID:-} ]]; then
+    printf '\npress any key to close' >&2
+    read -rsn1
+  fi
+  exit 1
+}
+
+for dep in "$HERDR" fzf jq; do
+  command -v "$dep" >/dev/null || fail "$dep not found"
+done
+
+sessions_json() {
+  "$HERDR" session list --json 2>/dev/null
+}
+
+list_sessions() {
+  sessions_json \
+    | jq -r '.sessions | sort_by(.running | not) | .[] | [.name, (.running | tostring), (.default | tostring)] | @tsv' \
+    | while IFS=$'\t' read -r name running default; do
+        if [[ $running == true ]]; then
+          state="${green}● running${reset}"
+        else
+          state="${gray}○ stopped${reset}"
+        fi
+        deftag=""
+        [[ $default == true ]] && deftag="  ${blue}(default)${reset}"
+        curtag=""
+        [[ $name == "${HOP_CURRENT_SESSION:-}" ]] && curtag="  ${yellow}◆ current${reset}"
+        # col 1 (hidden) = name for actions; col 2 = display: name + state
+        printf '%s\t%-22s %s%s%s\n' "$name" "$name" "$state" "$deftag" "$curtag"
+      done
+}
+
+# Prints the fzf header, with an error line when the session is still running.
+delete_session() {
+  if sessions_json | jq -e --arg name "$1" '.sessions[] | select(.name == $name and .running)' >/dev/null; then
+    printf '%s\n%s\n' "$header" "${red}'$1' is running, stop it first (ctrl-k)${reset}"
+  else
+    "$HERDR" session delete "$1" >/dev/null 2>&1
+    echo "$header"
+  fi
+}
+
+# Prints the picked session name, or nothing when the picker is dismissed.
+pick_session() {
+  local out rc query name
+  out=$(list_sessions | fzf --ansi \
+    --delimiter='\t' --with-nth=2 \
+    --print-query \
+    --prompt='herdr ❯ ' \
+    --header="$header" \
+    --bind='alt-enter:print-query' \
+    --bind="ctrl-k:execute-silent('$HERDR' session stop {1})+change-header($header)+reload(bash '$self' --list)" \
+    --bind="ctrl-x:transform-header(bash '$self' --delete {1})+reload(bash '$self' --list)")
+  rc=$?
+
+  # esc / ctrl-c / ctrl-g -> quit (rc 130). 0 = match selected, 1 = no match (create).
+  [[ $rc -ge 2 ]] && return
+
+  query=$(sed -n 1p <<<"$out")
+  name=$(sed -n 2p <<<"$out" | cut -f1)
+  echo "${name:-${query// /-}}"
+}
+
+# Prints the herdr client started by the hop process $1. Uses ps instead of
+# pgrep: BSD pgrep hides the caller's ancestors, and a new session's server is
+# a child of the client, so the client is an ancestor of the popup.
+hop_client() {
+  ps -A -o pid= -o ppid= -o args= | awk -v hop="$1" '
+    $2 == hop { n = split($3, path, "/"); if (path[n] == "herdr") { print $1; exit } }'
+}
+
+switch_session() {
+  local current hop client target
+  current=$(sessions_json | jq -r --arg sock "$HERDR_SOCKET_PATH" '.sessions[] | select(.socket_path == $sock) | .name')
+  [[ -n $current ]] || fail "cannot resolve the current session"
+
+  hop=$(cat "$state_dir/$current.pid" 2>/dev/null)
+  client=$([[ -n $hop ]] && hop_client "$hop")
+  [[ -n $client ]] || fail "'$current' was not started with hop. Detach and run \`hop\` from a shell to enable session switching."
+
+  # Exported so fzf reloads (`--list`) keep tagging the current session.
+  export HOP_CURRENT_SESSION=$current
+  target=$(pick_session)
+  [[ -n $target && $target != "$current" ]] || exit 0
+
+  echo "$target" >"$state_dir/$hop.next"
+  # SIGHUP makes the client restore the terminal and exit; the server keeps running.
+  kill -HUP "$client"
+}
+
+# fzf reload/transform actions re-invoke the script.
+case ${1:-} in
+  --list) list_sessions; exit 0 ;;
+  --delete) delete_session "$2"; exit 0 ;;
+  --switch)
+    [[ -n ${HERDR_ENV:-} ]] || fail "--switch only works inside herdr"
+    switch_session
+    exit 0
+    ;;
+  -h | --help)
+    sed -n '2,11s/^# \{0,1\}//p' "$self"
+    exit 0
+    ;;
+esac
+
+[[ -z ${HERDR_ENV:-} ]] || fail "already inside herdr, use the herdr-hop.session action to switch sessions"
+
+target=${1:-$(pick_session)}
+[[ -n $target ]] || exit 0
+
+mkdir -p "$state_dir"
+next_file="$state_dir/$$.next"
+rm -f "$next_file"
+
+while :; do
+  # Name the host window after the session (OSC 2). herdr never sets a window
+  # title, so this one sticks for the life of the window.
+  printf '\033]2;herdr:%s\007' "$target"
+  echo $$ >"$state_dir/$target.pid"
+
+  "$HERDR" --session "$target"
+
+  [[ $(cat "$state_dir/$target.pid" 2>/dev/null) == "$$" ]] && rm -f "$state_dir/$target.pid"
+  [[ -f $next_file ]] || break
+  target=$(<"$next_file")
+  rm -f "$next_file"
+done
