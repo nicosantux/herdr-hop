@@ -15,7 +15,9 @@ self=$(realpath "$0")
 header='enter: attach/create · alt-enter: create · ctrl-k: stop · ctrl-x: delete · esc: quit'
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-hop"
 
-green=$(tput setaf 2) gray=$(tput setaf 8) blue=$(tput setaf 4) red=$(tput setaf 1) yellow=$(tput setaf 3) reset=$(tput sgr0)
+# Colors stay empty with NO_COLOR or without a usable terminal (TERM unset).
+color() { [[ -z ${NO_COLOR:-} ]] && tput "$@" 2>/dev/null; }
+green=$(color setaf 2) gray=$(color setaf 8) blue=$(color setaf 4) red=$(color setaf 1) yellow=$(color setaf 3) reset=$(color sgr0)
 
 fail() {
   printf '%s\n' "${red}hop: $1${reset}" >&2
@@ -47,8 +49,8 @@ list_sessions() {
         [[ $default == true ]] && deftag="  ${blue}(default)${reset}"
         curtag=""
         [[ $name == "${HOP_CURRENT_SESSION:-}" ]] && curtag="  ${yellow}◆ current${reset}"
-        # col 1 (hidden) = name for actions; col 2 = display: name + state
-        printf '%s\t%-22s %s%s%s\n' "$name" "$name" "$state" "$deftag" "$curtag"
+        # Fields: name for actions (hidden), name, state. Search only matches the name.
+        printf '%s\t%-22s\t%s%s%s\n' "$name" "$name" "$state" "$deftag" "$curtag"
       done
 }
 
@@ -66,7 +68,7 @@ delete_session() {
 pick_session() {
   local out rc query name
   out=$(list_sessions | fzf --ansi \
-    --delimiter='\t' --with-nth=2 \
+    --delimiter='\t' --with-nth=2,3 --nth=1 \
     --print-query \
     --prompt='herdr ❯ ' \
     --header="$header" \

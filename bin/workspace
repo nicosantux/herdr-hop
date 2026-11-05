@@ -10,6 +10,15 @@ self=$(realpath "$0")
 config_dir=${HERDR_PLUGIN_CONFIG_DIR:-$("$HERDR" plugin config-dir herdr-hop 2>/dev/null)}
 extra_dirs_file="$config_dir/extra-dirs"
 
+# ANSI palette colors, so they follow the terminal theme. NO_COLOR disables them.
+if [[ -z ${NO_COLOR:-} ]]; then
+  dim=$'\033[90m' green=$'\033[32m' yellow=$'\033[33m' blue=$'\033[34m' reset=$'\033[0m'
+  git_color=always
+else
+  dim='' green='' yellow='' blue='' reset=''
+  git_color=never
+fi
+
 fail() {
   printf 'hop workspace: %s\n\npress any key to close' "$1"
   read -rsn1
@@ -55,7 +64,7 @@ open_cwds() {
   "$HERDR" pane list | jq -r '.result.panes | group_by(.workspace_id)[] | .[0].cwd // empty'
 }
 
-# TSV rows for fzf: path, display path.
+# TSV rows for fzf: path, display path with a dimmed parent and the folder name.
 list_folders() {
   {
     command -v zoxide >/dev/null && zoxide query --list
@@ -67,7 +76,11 @@ list_folders() {
         [[ -d $dir ]] || continue
         display=$dir
         [[ $dir == "$HOME" || $dir == "$HOME"/* ]] && display="~${dir#"$HOME"}"
-        printf '%s\t%s\n' "$dir" "$display"
+        if [[ $display == */* ]]; then
+          printf '%s\t%s%s/%s%s\n' "$dir" "$dim" "${display%/*}" "$reset" "${display##*/}"
+        else
+          printf '%s\t%s\n' "$dir" "$display"
+        fi
       done
 }
 
@@ -75,20 +88,29 @@ list_folders() {
 preview() {
   local dir=$1
   if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
-    git -C "$dir" status --porcelain=v2 --branch | awk '
-      /^# branch.head / { head = $3 }
-      /^# branch.ab / { ahead = substr($3, 2) + 0; behind = substr($4, 2) + 0 }
-      !/^#/ { changed++ }
-      END {
-        line = "\033[32m" head "\033[0m"
-        if (ahead) line = line "  ↑" ahead
-        if (behind) line = line "  ↓" behind
-        print line "  · " (changed ? changed " changed" : "clean")
-      }'
-    git -C "$dir" log -1 --format='%s %C(dim)· %cr%C(reset)' --color=always 2>/dev/null
+    git -C "$dir" status --porcelain=v2 --branch \
+      | awk -v dim="$dim" -v green="$green" -v yellow="$yellow" -v reset="$reset" '
+          /^# branch.head / { head = $3 }
+          /^# branch.ab / { ahead = substr($3, 2) + 0; behind = substr($4, 2) + 0 }
+          !/^#/ { changed++ }
+          END {
+            line = green head reset
+            if (ahead) line = line "  " yellow "↑" ahead reset
+            if (behind) line = line "  " yellow "↓" behind reset
+            print line "  " dim "·" reset " " (changed ? yellow changed " changed" : green "clean") reset
+          }'
+    git -C "$dir" log -1 --format='%s %C(dim)· %cr%C(reset)' --color="$git_color" 2>/dev/null
     echo
   fi
-  ls -Ap "$dir"
+  local entry
+  shopt -s nullglob dotglob
+  for entry in "$dir"/*; do
+    if [[ -d $entry ]]; then
+      printf '%s%s/%s\n' "$blue" "${entry##*/}" "$reset"
+    else
+      printf '%s\n' "${entry##*/}"
+    fi
+  done
 }
 
 case ${1:-} in
@@ -100,7 +122,7 @@ esac
 folders=$(list_folders)
 [[ -n $folders ]] || fail "no folders to open: install zoxide or add folders to $extra_dirs_file"
 
-dir=$(fzf \
+dir=$(fzf --ansi \
   --delimiter='\t' --with-nth=2 \
   --tiebreak=index \
   --prompt='workspace ❯ ' \
