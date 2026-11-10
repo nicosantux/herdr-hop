@@ -71,7 +71,7 @@ Then run `herdr server reload-config`. Avoid `prefix+s`, which herdr uses for se
 
 ### Session switcher
 
-Run `hop` from a shell, or trigger `herdr-hop.session` inside herdr. The current session is tagged with `◆ current`.
+Run `hop` from a shell, or trigger `herdr-hop.session` inside herdr. The current session is tagged with `◆ current`, and the session you came from is listed first, so `enter` hops back and forth between the last two.
 
 | Key | Action |
 | --- | --- |

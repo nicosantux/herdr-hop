@@ -38,7 +38,7 @@ sessions_json() {
 
 list_sessions() {
   sessions_json \
-    | jq -r '.sessions | sort_by(.running | not) | .[] | [.name, (.running | tostring), (.default | tostring)] | @tsv' \
+    | jq -r --arg last "${HOP_LAST_SESSION:-}" '.sessions | sort_by([.name != $last, (.running | not)]) | .[] | [.name, (.running | tostring), (.default | tostring)] | @tsv' \
     | while IFS=$'\t' read -r name running default; do
         if [[ $running == true ]]; then
           state="${green}● running${reset}"
@@ -102,12 +102,16 @@ switch_session() {
   client=$([[ -n $hop ]] && hop_client "$hop")
   [[ -n $client ]] || fail "'$current' was not started with hop. Detach and run \`hop\` from a shell to enable session switching."
 
-  # Exported so fzf reloads (`--list`) keep tagging the current session.
+  # Exported so fzf reloads (`--list`) keep tagging the current session and
+  # listing the previous one first, so enter hops back and forth.
   export HOP_CURRENT_SESSION=$current
+  HOP_LAST_SESSION=$(cat "$state_dir/$hop.last" 2>/dev/null)
+  export HOP_LAST_SESSION
   target=$(pick_session)
   [[ -n $target && $target != "$current" ]] || exit 0
 
   echo "$target" >"$state_dir/$hop.next"
+  echo "$current" >"$state_dir/$hop.last"
   # SIGHUP makes the client restore the terminal and exit; the server keeps running.
   kill -HUP "$client"
 }
@@ -145,7 +149,7 @@ while :; do
   "$HERDR" --session "$target"
 
   [[ $(cat "$state_dir/$target.pid" 2>/dev/null) == "$$" ]] && rm -f "$state_dir/$target.pid"
-  [[ -f $next_file ]] || break
+  [[ -f $next_file ]] || { rm -f "$state_dir/$$.last"; break; }
   target=$(<"$next_file")
   rm -f "$next_file"
 done
